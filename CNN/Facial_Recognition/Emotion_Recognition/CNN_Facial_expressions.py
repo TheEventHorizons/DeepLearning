@@ -1,142 +1,282 @@
+import os, sys, time
+import csv
+import math, random
+import seaborn as sns
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import h5py
+import time
+from tensorflow.keras.optimizers import Adam
+from pathlib import Path
+import pathlib
+from skimage.morphology import disk
+from skimage.util import img_as_ubyte
+from skimage.filters import rank
+from skimage import io, color, exposure, transform
+from sklearn.metrics import confusion_matrix
 import tensorflow as tf
 import keras
 from keras.callbacks import TensorBoard
-
-import numpy as np 
-import matplotlib.pyplot as plt
-import h5py
-import os, time, sys
-import random
-
-from importlib import reload
+import keras.preprocessing.image 
 
 
 
 
-enhanced_dir = '/Users/jordanmoles/Documents/Programmes_Informatiques/Python/Projects/DeepLearning/CNN/Basics/BenchMarks/archive/data'
-
-dataset_name = 'set-24x24-L'
-batch_size = 64
-epochs = 10
-scale = 1
+from keras.preprocessing.image import ImageDataGenerator
 
 
-def read_dataset(enhanced_dir, dataset_name):
-    '''Reads h5 dataset
-    Args:
-        filename     : datasets filename
-        dataset_name : dataset name, without .h5
-    Returns:    x_train,y_train, x_test,y_test data, x_meta,y_meta'''
+scale = 0.1
 
-    # Read Dataset
-    filename = f'{enhanced_dir}/{dataset_name}.h5'
-    with h5py.File(filename,'r') as f:
-        print(list(f.keys()))
-        x_train = f['x_train'][:]
-        y_train = f['y_train'][:]
-        x_test = f['x_test'][:]
-        y_test = f['y_test'][:]
-        x_meta = f['x_meta'][:]
-        y_meta = f['y_meta'][:]                    
-    print(x_train.shape, y_train.shape)
+data_dir = '/path/folder/archive/'
+data_dir_train = '/path/folder/archive/reduced/train'
+data_dir_val = '/path/folder/archive/reduced/validation'
 
 
-    # Shuffle train set
-    train_indices = list(range(len(x_train)))
-    random.shuffle(train_indices)
+emotions = ['sad','happy','anger','neutral']
 
-    x_train = x_train[train_indices]
-    y_train = y_train[train_indices]
-    return  x_train,y_train, x_test,y_test, x_meta,y_meta
+
+
+batch_size = 20
 
 
 
 
-## Read dataset
+
+
+# Set the size of the images
+img_size = (48, 48)
+
+# Create an image generator for training with data augmentation
+train_datagen = ImageDataGenerator(
+    rescale=1./255,          # Normalize pixel values between 0 and 1
+    shear_range=0.2,         # Shear effect
+    zoom_range=0.2,          # Zoom effect
+    horizontal_flip=True,    # Horizontal flip
     
-X_train, y_train, X_test, y_test, X_meta, y_meta = read_dataset(enhanced_dir, dataset_name)
+)
 
-print(X_train.shape)
+# Create an image generator for validation without data augmentation
+val_datagen = ImageDataGenerator(rescale=1./255)
 
-class_unique = np.unique(y_train)
-images_per_row = 8
-num_row = len(class_unique) // images_per_row + int(len(class_unique) % images_per_row != 0)
-num_column = images_per_row
+# Load training and validation images
+train_generator = train_datagen.flow_from_directory(
+    data_dir_train,
+    target_size=img_size,
+    batch_size=batch_size,
+    class_mode='categorical'  # Use 'categorical' for categorical labels
+)
 
-fig, ax = plt.subplots(num_row, num_column, figsize=(15, 3 * num_row))
+validation_generator = val_datagen.flow_from_directory(
+    data_dir_val,
+    target_size=img_size,
+    batch_size=batch_size,
+    class_mode='categorical'
+)
 
-for i, Class_label in enumerate(class_unique):
-    row = i // num_column
-    column = i % num_column
-    Class_index = np.where(y_train == Class_label)[0]
-    ax[row, column].imshow(X_train[Class_index[0]])
-    ax[row, column].set_title(f'Classe {Class_label}')
-    ax[row, column].axis('off')
+
+
+
+
+
+
+
+#####################################################################
+
+
+# Prepare callbacks
+
+
+
+# It's possible to save the model each epoch or at each improvement. The model can be saved completely or partially. 
+# For full format we can use HDF5 format
+
+
+from datetime import datetime
+
+# Create directories
+run_dir = '/path/folder/archive/reduced/'
+os.makedirs(os.path.join(run_dir, 'models'), exist_ok=True)
+os.makedirs(os.path.join(run_dir, 'logs'), exist_ok=True)
+
+# TensorBoard Callback
+log_dir = os.path.join(run_dir, "logs", "tb_" + datetime.now().strftime("%Y%m%d-%H%M%S"))
+tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1)
+
+# ModelCheckpoint Callback - Save the best model based on validation metric
+bestmodel_checkpoint_dir = os.path.join(run_dir, "models", "best-model.h5")
+bestmodel_callback = tf.keras.callbacks.ModelCheckpoint(filepath=bestmodel_checkpoint_dir,
+                                                         verbose=0,
+                                                         monitor='val_accuracy',  # Use the validation metric
+                                                         save_best_only=True)
+
+# ModelCheckpoint Callback - Save the model at each epoch
+checkpoint_dir = os.path.join(run_dir, "models", "model-{epoch:04d}.h5")
+savemodel_callback = tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_dir, verbose=0)
+
+# Display the command to run TensorBoard
+tensorboard_command = f'tensorboard --logdir {os.path.abspath(log_dir)}'
+print(f'To run TensorBoard, use the following command:\n{tensorboard_command}')
+
+
+
+#####################################################################
+
+
+
+
+
+train_data = tf.keras.preprocessing.image_dataset_from_directory(
+    data_dir_train,
+    validation_split=0.2,
+    subset="training",
+    seed=42,
+    image_size=img_size,
+    batch_size=batch_size,
+)
+
+
+
+val_data = tf.keras.preprocessing.image_dataset_from_directory(
+    data_dir_val,
+    validation_split = 0.2,
+    subset = "validation",
+    seed = 42,
+    image_size = img_size,
+    batch_size = batch_size,
+)
+
+
+
+class_names = train_data.class_names
+print(class_names)
+
+# Get a batch of images and labels from the train_data
+for images, labels in train_data.take(1):
+    # Display the first 4 images
+    plt.figure(figsize=(10, 10))
+    for i in range(4):
+        ax = plt.subplot(1, 4, i + 1)
+        plt.imshow(images[i].numpy().astype("uint8"))
+        plt.title(class_names[labels[i]])  # Convert categorical labels to index
+        plt.axis("off")
+
+plt.show()
+
+
+
+# The model
+
+num_class = 4
+
+model = tf.keras.Sequential([
+
+    keras.layers.experimental.preprocessing.Rescaling(1./255),
+    keras.layers.Conv2D(128, 4, activation='relu'),
+    keras.layers.MaxPool2D(),
+    keras.layers.Dropout(0.2),
+
+    keras.layers.Conv2D(64, 4, activation='relu'),
+    keras.layers.MaxPool2D(),
+    keras.layers.Dropout(0.2),
+
+    keras.layers.Conv2D(32, 4, activation='relu'),
+    keras.layers.MaxPool2D(),
+    keras.layers.Dropout(0.2),
+
+
+    keras.layers.Flatten(),
+    keras.layers.Dense(64, activation='relu'),
+    keras.layers.Dropout(0.5),
+
+    keras.layers.Dense(num_class,activation='softmax')
+
+
+])
+
+# Create an Adam optimizer with the desired learning rate
+custom_optimizer = Adam(learning_rate=0.0005)  
+
+
+
+model.compile(optimizer=custom_optimizer,
+              loss='sparse_categorical_crossentropy',
+              metrics = ['accuracy'])
+
+
+history = model.fit(train_data,
+                    validation_data = val_data,
+                    epochs = 30,
+                    batch_size = batch_size,
+                    verbose = 1,
+                    callbacks=[tensorboard_callback,bestmodel_callback,savemodel_callback])
+
+print(history)
+
+
+model.summary()
+
+
+
+
+
+score = model.evaluate(val_data, verbose = 0)
+
+
+
+print('Test loss: {:5.4f}'.format(score[0]))
+print('Test accuracy: {:5.4f}'.format(score[1]))
+
+
+# Retrieving training and validation metrics
+train_accuracy = history.history['accuracy']
+train_loss = history.history['loss']
+val_accuracy = history.history['val_accuracy']
+val_loss = history.history['val_loss']
+
+# Visualizing the evolution of accuracy
+plt.figure(figsize=(10, 5))
+plt.subplot(1, 2, 1)
+plt.plot(train_accuracy, label='Train Accuracy')
+plt.plot(val_accuracy, label='Validation Accuracy')
+plt.xlabel('Epochs')
+plt.ylabel('Accuracy')
+plt.legend()
+
+# Visualizing the evolution of loss
+plt.subplot(1, 2, 2)
+plt.plot(train_loss, label='Train Loss')
+plt.plot(val_loss, label='Validation Loss')
+plt.xlabel('Epochs')
+plt.ylabel('Loss')
+plt.legend()
 
 plt.tight_layout()
 plt.show()
 
 
-# Create a model
 
-def model_v1(lx,ly,lz):
+# Load a single image from the validation set
+sample_image, sample_label = next(iter(validation_generator))
 
-    model = keras.models.Sequential()
+# Expand dimensions for prediction
+sample_image = np.expand_dims(sample_image[0], axis=0)
 
-    model.add(keras.layers.Input(shape=(lx, ly, lz)))
-    model.add( keras.layers.Conv2D(96, (3,3), activation='relu') )
-    model.add( keras.layers.MaxPool2D((2,2)) )
-    model.add( keras.layers.Dropout(0.2) )
-
-
-    model.add( keras.layers.Conv2D(192, (3,3), activation='relu') )
-    model.add( keras.layers.MaxPool2D((2,2)) )
-    model.add( keras.layers.Dropout(0.2) )
-
-    model.add( keras.layers.Flatten() )
-    model.add( keras.layers.Dense(1000, activation='relu') )
-    model.add( keras.layers.Dropout(0.5) )
-
-    model.add( keras.layers.Dense(43, activation='softmax'))
-
-    return model
+# Make prediction
+predictions = model.predict(sample_image)
 
 
-(n,lx,ly,lz) = X_train.shape
+# Get the predicted class and probabilities
+predicted_class = np.argmax(predictions)
+predicted_probabilities = predictions[0]
 
+print(predicted_probabilities)
 
-print("Images of the dataset have this following shape:", (lx,ly,lz))
+# Get the actual class
+actual_class = np.argmax(sample_label[0])
 
-
-model = model_v1(lx,ly,lz)
-
-model.summary()
-
-
- # Shuffle train set
-train_indices = list(range(len(X_train)))
-random.shuffle(train_indices)
-
-X_test = X_test/X_train.max()
-
-X_train = X_train[train_indices]/X_train.max()
-y_train = y_train[train_indices]
-
-
-
-
-model.compile(optimizer = 'adam',
-              loss = 'sparse_categorical_crossentropy',
-              metrics = ['accuracy'])
-
-history = model.fit(X_train, y_train,
-                    batch_size = batch_size,
-                    epochs = epochs,
-                    verbose = 1,
-                    validation_data=(X_test,y_test))
-
-score = model.evaluate(X_test,y_test, verbose = 0)
-
-
-print('Test loss: {:5.4f}'.format(score[0]))
-print('Test accuracy: {:5.4f}'.format(score[1]))
+# Visualize the results
+plt.imshow(np.squeeze(sample_image))
+plt.title(f'Predicted Class: {class_names[predicted_class]}, Actual Class: {class_names[actual_class]}')
+plt.axis('off')
+plt.show()
